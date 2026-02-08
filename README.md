@@ -1,7 +1,5 @@
 # ReyCoquaisConstantin
 
-[![R-CMD-check](https://github.com/ReyCoquaisConstantin/actions/workflows/R-CMD-check.yaml/badge.svg)](https://github.com/ReyCoquaisConstantin/actions/workflows/R-CMD-check.yaml)
-
 ## Overview
 
 This R package constitutes the final delivery for the **Time Series Forecasting Academic Project**. 
