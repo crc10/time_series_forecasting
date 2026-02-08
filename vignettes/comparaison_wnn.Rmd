@@ -1,0 +1,148 @@
+---
+title: "WNN vs Classical Algorithms Comparison"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{WNN vs Classical Algorithms Comparison}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+Sys.setenv(LANG = "en")
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 7,
+  fig.height = 5
+)
+```
+
+```{r setup}
+library(ReyCoquaisConstantin)
+library(readxl)
+library(dplyr)
+library(ggplot2)
+```
+
+## 1. Data loading and preprocessing
+
+```{r data_loading}
+file_path <- system.file("extdata", "Elec-train.xlsx", package = "ReyCoquaisConstantin")
+
+raw_data <- read_excel(file_path)
+
+# 15 minutes timestep with daily periodicity --> 4*24 = 96
+FREQ_DAILY <- 96
+# our data starts at 01:15 am which is the 5th point of the day
+elec_ts <- ts(raw_data$`Power (kW)`, frequency = FREQ_DAILY, start = c(1, 5))
+
+# Calling an auxiliary logic to clean some outliers on the day before the day to be predicted
+elec_cleaned_vec <- clean_elec_data(elec_ts)
+elec_cleaned_ts  <- ts(elec_cleaned_vec, frequency = FREQ_DAILY, start = c(1, 5))
+
+# removing the NA values in the end (the data to be predicted in fact)
+idx_valid <- which(!is.na(elec_cleaned_ts))
+last_idx <- max(idx_valid)
+
+# Final series to train on
+train_ts <- window(elec_cleaned_ts, end = time(elec_cleaned_ts)[last_idx])
+
+plot(train_ts, main = "Cleaned Power Consumption", ylab = "Power (kW)",xlab="Days")
+```
+
+## 2. Fine-tuning K (Grid Search)
+
+The paper presents the *Weighted Nearest Neighbors* implementation for time series forecasting, relying on three key parameters:
+
+* **$w$ (Window Size):** The size of the sequence used for comparison.
+* **$k$ (Number of Neighbors):** The number of most similar points to take into account when forecasting.
+* **$h$ (Horizon):** The number of future values to predict.
+
+Our series has a daily periodicity and we want to forecast one day of data. Therefore $w$ = $h$ = 96, 96 being the number of points in one day. We will focus on fine-tuning $k$ and we'll do this with a **Grid Search**. We are going to implement a **Rolling Origin** on the 7 last days of the series to then compute a mean of the MAPE and RMSE values over the 7 days for each $k$ of the Grid
+
+```{r grid_search}
+results <- data.frame(k = integer(), MAPE = numeric(), RMSE = numeric())
+h_horizon <- 96 
+
+# Testing k from 1 to 30 because WNN is really efficient
+for (k in 1:30) {
+  
+  # Wrapper to call our wnn class
+  wrapper_wnn <- function(train_set, h) {
+    wnn_forecast(as.numeric(train_set), w = 96, h = h, k = k)
+  }
+  
+  # Auxiliary cross validation
+  scores <- cross_validate(train_ts, wrapper_wnn, h = h_horizon, n_folds = 7)
+  
+  results <- rbind(results, data.frame(k = k, MAPE = scores["MAPE"], RMSE = scores["RMSE"]))
+}
+```
+Let's plot the RMSE evolution to choose the best $k$
+```{r}
+ggplot(results, aes(x = k, y = RMSE)) +
+  geom_line(color = "steelblue", size = 1) +
+  geom_point(color = "darkblue", size = 2) +
+  geom_point(data = results[which.min(results$RMSE), ], 
+             color = "red", size = 4, shape = 1) +
+  scale_x_continuous(breaks = 1:30) +
+  labs(
+    title = "Optimization of Hyperparameter k (Weighted Nearest Neighbors)",
+    subtitle = paste0("Optimal k identified: ", results$k[which.min(results$RMSE)]),
+    x = "Number of neighbors (k)",
+    y = "Root Mean Squared Error (RMSE)"
+  ) +
+  theme_minimal()
+```
+
+
+```{r select_best}
+# Selecting the best k
+best_k <- results$k[which.min(results$RMSE)]
+best_mape <- min(results$MAPE)
+best_rmse <- min(results$RMSE)
+
+cat(paste0("Best WNN model obtained with k = ", best_k, 
+           "\n average MAPE  on validation window : ", round(best_mape, 3), "%",
+            "\n average RMSE on validation window : ", round(best_rmse, 3), "%"))
+```
+
+## 3. Final forecast on 2/17/2010
+
+We now implement our best model ($k=`r best_k`$) trained on the **whole** time series to predict the 2/17/2010.
+
+```{r final_forecast}
+final_forecast_values <- wnn_forecast(as.numeric(train_ts), w = 96, h = 96, k = best_k)
+
+# Plotting
+final_forecast_ts <- ts(final_forecast_values, frequency = 96, start = c(50, 1))
+
+plot(train_ts, type='l', xlim=c(48, 51), main=paste("WNN forecast for Feb, 17th (k=", best_k,")"), ylab="kW")
+lines(final_forecast_ts, col="red", lwd=2)
+legend("topleft", legend=c("Historical", "Forecast WNN"), col=c("black", "red"), lty=1, lwd=1)
+grid()
+```
+
+## 4. Comparison with the other methods implemented in inst/main.Rmd
+
+In our previous study, we have come up with a *SARIMA(4,0,0)(0,1,1)[96]* being our best performer on the same sliding cross validation with a $MAPE$ = 4.07 and $RMSE$ = 14.8 kW
+
+```{r comparison}
+sarima_mape <- 4.07
+sarima_rmse <- 14.82
+
+comparison_df <- data.frame(
+  Modèle = c("SARIMA (Part 1)", "WNN (R Package)"),
+  `k optimal` = c("N/A", best_k),
+  MAPE = c(sarima_mape, round(best_mape, 3)),
+  RMSE = c(sarima_rmse, round(best_rmse, 3))
+)
+
+knitr::kable(comparison_df, caption = "Comaprative table of the models")
+```
+
+### Conclusion
+
+The WNN model achieves a MAPE of **`r round(best_mape, 2)`%**, yielding performance metrics that are very close to the SARIMA model (**`r sarima_mape`%**). While slightly less precise, the WNN model stands out due to its radically superior computational efficiency.
+
+In the context of high-frequency data ($f=96$), hyperparameter optimization for SARIMA models (and a fortiori the auto.arima procedure) becomes extremely computationally expensive. Conversely, the non-parametric WNN approach bypasses this complex estimation phase, offering quasi-instantaneous execution. Consequently, this model constitutes a particularly relevant alternative when deployment speed takes precedence over marginal gains in precision.
